@@ -5,7 +5,7 @@ local M = {}
 -- ============================================================================
 
 -- Default plugin configuration
-local default_config = {
+M.default_config = {
   -- API configuration
   api = {
     model = "claude-3-7-sonnet-20250219",               -- The Claude model to use
@@ -16,6 +16,30 @@ local default_config = {
     proxy_url_env = "LLM_PROXY",                        -- Environment variable for proxy URL
     proxy_model = "anthropic:claude-3-7-sonnet",        -- Model name when using proxy
     proxy_api_key_env = "OPENAI_API_KEY",               -- API key env var for proxy
+    max_tokens = 2000,                                  -- Max tokens to generate
+    temperature = 0.7,                                  -- Controls randomness (0.0-1.0)
+  },
+
+  -- Provider to use (must be a key in the providers map)
+  provider = "default",
+  
+  -- Provider configuration (new style - multiple providers)
+  providers = {
+    -- Default Anthropic provider
+    default = {
+      endpoint = "https://api.anthropic.com/v1/messages", -- API endpoint
+      api_key = nil,                                      -- API key (string, env, or cmd)
+      model = "claude-3-7-sonnet-20250219",               -- Model name 
+      max_tokens = 2000,                                  -- Max tokens to generate
+      temperature = 0.7,                                  -- Controls randomness (0.0-1.0)
+    },
+  },
+  
+  -- Legacy single provider config (maintained for backward compatibility)
+  provider = {
+    endpoint = "https://api.anthropic.com/v1/messages", -- API endpoint
+    api_key = nil,                                      -- API key (string, env, or cmd)
+    model = "claude-3-7-sonnet-20250219",               -- Model name 
     max_tokens = 2000,                                  -- Max tokens to generate
     temperature = 0.7,                                  -- Controls randomness (0.0-1.0)
   },
@@ -112,7 +136,7 @@ local config = {}
 -- Initialize the plugin with user configuration
 function M.setup(user_config)
   -- Merge default config with user config
-  config = vim.tbl_deep_extend("force", default_config, user_config or {})
+  config = vim.tbl_deep_extend("force", M.default_config, user_config or {})
 
   -- Setup commands
   vim.api.nvim_create_user_command("ClaudeToggle", M.toggle_popup, {})
@@ -244,6 +268,99 @@ end
 
 -- Get API key from config or environment variable
 function M.get_api_key(use_proxy)
+  -- Check if we're using the providers system (new-style)
+  if config.providers and config.provider then
+    -- Get the active provider name
+    local provider_name = config.provider
+    
+    -- Make sure the specified provider exists
+    if not config.providers[provider_name] then
+      M.show_error("Provider '" .. provider_name .. "' not found in providers configuration")
+      return nil
+    end
+    
+    -- Get the provider configuration
+    local provider_config = config.providers[provider_name]
+    
+    -- Check for API key in the provider
+    if provider_config.api_key then
+      local api_key_config = provider_config.api_key
+      
+      -- Handle string literal API key
+      if type(api_key_config) == "string" then
+        return api_key_config
+      -- Handle { env = "ENV_VAR_NAME" } format
+      elseif type(api_key_config) == "table" and api_key_config.env then
+        local api_key = os.getenv(api_key_config.env)
+        if not api_key or api_key == "" then
+          M.show_error("API key not found in environment variable: " .. api_key_config.env)
+          return nil
+        end
+        return api_key
+      -- Handle { cmd = "shell command" } format
+      elseif type(api_key_config) == "table" and api_key_config.cmd then
+        local handle = io.popen(api_key_config.cmd)
+        if not handle then
+          M.show_error("Failed to execute command: " .. api_key_config.cmd)
+          return nil
+        end
+        
+        local api_key = handle:read("*a")
+        handle:close()
+        
+        -- Trim whitespace
+        api_key = api_key:gsub("^%s*(.-)%s*$", "%1")
+        
+        if not api_key or api_key == "" then
+          M.show_error("Command returned empty API key: " .. api_key_config.cmd)
+          return nil
+        end
+        
+        return api_key
+      end
+    end
+  end
+  
+  -- Check if the single provider config is being used (transitional approach)
+  if config.provider and type(config.provider) == "table" and config.provider.api_key then
+    local api_key_config = config.provider.api_key
+    
+    -- Handle string literal API key
+    if type(api_key_config) == "string" then
+      return api_key_config
+    -- Handle { env = "ENV_VAR_NAME" } format
+    elseif type(api_key_config) == "table" and api_key_config.env then
+      local api_key = os.getenv(api_key_config.env)
+      if not api_key or api_key == "" then
+        M.show_error("API key not found in environment variable: " .. api_key_config.env)
+        return nil
+      end
+      return api_key
+    -- Handle { cmd = "shell command" } format
+    elseif type(api_key_config) == "table" and api_key_config.cmd then
+      local handle = io.popen(api_key_config.cmd)
+      if not handle then
+        M.show_error("Failed to execute command: " .. api_key_config.cmd)
+        return nil
+      end
+      
+      local api_key = handle:read("*a")
+      handle:close()
+      
+      -- Trim whitespace
+      api_key = api_key:gsub("^%s*(.-)%s*$", "%1")
+      
+      if not api_key or api_key == "" then
+        M.show_error("Command returned empty API key: " .. api_key_config.cmd)
+        return nil
+      end
+      
+      return api_key
+    end
+  end
+  
+  -- Fall back to the old configuration format
+  
   -- Determine which API key to use based on proxy setting
   local key_env = use_proxy and config.api.proxy_api_key_env or config.api.api_key_env
 
@@ -260,6 +377,36 @@ function M.get_api_key(use_proxy)
   end
 
   return api_key
+end
+
+-- Get current provider configuration
+function M.get_provider_config()
+  -- Check if we're using the providers system
+  if config.providers and config.provider and type(config.provider) == "string" then
+    local provider_name = config.provider
+    
+    -- Make sure the specified provider exists
+    if not config.providers[provider_name] then
+      M.show_error("Provider '" .. provider_name .. "' not found in providers configuration")
+      return nil
+    end
+    
+    -- Return the provider configuration
+    return config.providers[provider_name]
+  end
+  
+  -- Fall back to the single provider configuration if available
+  if config.provider and type(config.provider) == "table" then
+    return config.provider
+  end
+  
+  -- Last resort: create a provider config from the legacy api config
+  return {
+    endpoint = config.api.endpoint,
+    model = config.api.model,
+    max_tokens = config.api.max_tokens,
+    temperature = config.api.temperature,
+  }
 end
 
 -- Send a message to the Claude API (directly or via proxy)
@@ -302,11 +449,20 @@ end
 
 -- Send request directly to Claude API
 function M.send_via_direct_api(formatted_messages, api_key, temp_file, callback)
+  -- Get the provider configuration
+  local provider_config = M.get_provider_config()
+  if not provider_config then
+    M.state.waiting_response = false
+    M.remove_thinking_indicator()
+    vim.notify("Failed to get provider configuration", vim.log.levels.ERROR)
+    return
+  end
+  
   -- Prepare the request data for direct Claude API
   local request_data = {
-    model = config.api.model,
-    max_tokens = config.api.max_tokens,
-    temperature = config.api.temperature,
+    model = provider_config.model,
+    max_tokens = provider_config.max_tokens,
+    temperature = provider_config.temperature,
     messages = formatted_messages,
   }
 
@@ -327,6 +483,9 @@ function M.send_via_direct_api(formatted_messages, api_key, temp_file, callback)
   file:write(json_data)
   file:close()
 
+  -- Get the API endpoint from provider
+  local endpoint = provider_config.endpoint
+  
   -- Create the curl command using --data-binary @file to avoid escaping issues
   local cmd = string.format(
     "curl -s -X POST %s " ..
@@ -334,7 +493,7 @@ function M.send_via_direct_api(formatted_messages, api_key, temp_file, callback)
     "-H 'anthropic-version: 2023-06-01' " ..
     "-H 'content-type: application/json' " ..
     "--data-binary @%s > %s",
-    config.api.endpoint,
+    endpoint,
     api_key,
     request_file,
     temp_file
@@ -891,6 +1050,14 @@ function M.call_via_direct_api(system_prompt, user_prompt, temp_file, hide_statu
     return
   end
 
+  -- Get the provider configuration
+  local provider_config = M.get_provider_config()
+  if not provider_config then
+    hide_status()
+    vim.notify("Failed to get provider configuration", vim.log.levels.ERROR)
+    return
+  end
+  
   -- Format messages for Claude API - use system as top-level parameter
   local formatted_messages = {
     { role = "user", content = user_prompt }
@@ -898,9 +1065,9 @@ function M.call_via_direct_api(system_prompt, user_prompt, temp_file, hide_statu
 
   -- Prepare the request data
   local request_data = {
-    model = config.api.model,
-    max_tokens = config.api.max_tokens,
-    temperature = config.api.temperature,
+    model = provider_config.model,
+    max_tokens = provider_config.max_tokens,
+    temperature = provider_config.temperature,
     system = system_prompt,
     messages = formatted_messages,
   }
@@ -921,6 +1088,9 @@ function M.call_via_direct_api(system_prompt, user_prompt, temp_file, hide_statu
   file:write(json_data)
   file:close()
 
+  -- Get the API endpoint from provider
+  local endpoint = provider_config.endpoint
+  
   -- Create the curl command using --data-binary @file to avoid escaping issues
   local cmd = string.format(
     "curl -s -X POST %s " ..
@@ -928,7 +1098,7 @@ function M.call_via_direct_api(system_prompt, user_prompt, temp_file, hide_statu
     "-H 'anthropic-version: 2023-06-01' " ..
     "-H 'content-type: application/json' " ..
     "--data-binary @%s > %s",
-    config.api.endpoint,
+    endpoint,
     api_key,
     request_file,
     temp_file
